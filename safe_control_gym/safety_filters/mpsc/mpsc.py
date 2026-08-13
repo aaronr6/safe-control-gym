@@ -16,6 +16,7 @@ import numpy as np
 from safe_control_gym.controllers.lqr.lqr_utils import compute_lqr_gain, get_cost_weight_matrix
 from safe_control_gym.controllers.mpc.mpc_utils import reset_constraints
 from safe_control_gym.safety_filters.base_safety_filter import BaseSafetyFilter
+from safe_control_gym.safety_filters.mpsc.mpsc_cost_function.blended_cost import BLENDED_COST
 from safe_control_gym.safety_filters.mpsc.mpsc_cost_function.constant_cost import CONSTANT_COST
 from safe_control_gym.safety_filters.mpsc.mpsc_cost_function.learned_cost import LEARNED_COST
 from safe_control_gym.safety_filters.mpsc.mpsc_cost_function.lqr_cost import LQR_COST
@@ -40,6 +41,8 @@ class MPSC(BaseSafetyFilter, ABC):
                  cost_function: Cost_Function = Cost_Function.ONE_STEP_COST,
                  mpsc_cost_horizon: int = 5,
                  decay_factor: float = 0.85,
+                 regularization_weight: float = 1.0,
+                 blended_cost_alpha: float = 0.5,
                  use_acados: bool = False,
                  **kwargs
                  ):
@@ -57,6 +60,8 @@ class MPSC(BaseSafetyFilter, ABC):
             cost_function (Cost_Function): A string (from Cost_Function) representing the cost function to be used.
             mpsc_cost_horizon (int): How many steps forward to check for constraint violations.
             decay_factor (float): How much to discount future costs.
+            regularization_weight (float): Weight on the rate-of-change penalty for regularized costs.
+            blended_cost_alpha (float): Blend weight in [0, 1] from precomputed cost (0) to regularized cost (1).
         '''
 
         # Store all params/args.
@@ -103,7 +108,21 @@ class MPSC(BaseSafetyFilter, ABC):
         elif cost_function == Cost_Function.CONSTANT_COST:
             self.cost_function = CONSTANT_COST(self.env, mpsc_cost_horizon, decay_factor)
         elif cost_function == Cost_Function.REGULARIZED_COST:
-            self.cost_function = REGULARIZED_COST(self.env, mpsc_cost_horizon, decay_factor)
+            self.cost_function = REGULARIZED_COST(
+                self.env,
+                mpsc_cost_horizon,
+                decay_factor,
+                regularization_weight=regularization_weight,
+            )
+        elif cost_function == Cost_Function.BLENDED_COST:
+            self.cost_function = BLENDED_COST(
+                self.env,
+                mpsc_cost_horizon,
+                decay_factor,
+                self.output_dir,
+                regularization_weight=regularization_weight,
+                blend_alpha=blended_cost_alpha,
+            )
         elif cost_function == Cost_Function.LQR_COST:
             self.cost_function = LQR_COST(self.env, mpsc_cost_horizon, decay_factor)
         elif cost_function == Cost_Function.PRECOMPUTED_COST:
@@ -213,7 +232,7 @@ class MPSC(BaseSafetyFilter, ABC):
         clipped_X_GOAL = get_trajectory_on_horizon(self.env, iteration, self.horizon)
         opti.set_value(X_GOAL, clipped_X_GOAL)
 
-        if isinstance(self.cost_function, REGULARIZED_COST):
+        if getattr(self.cost_function, 'uses_prev_u', False):
             opti_dict['prev_u_val'] = self.prev_action
         self.cost_function.prepare_cost_variables(opti_dict, obs, iteration)
 

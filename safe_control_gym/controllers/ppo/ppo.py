@@ -252,7 +252,7 @@ class PPO(BaseController):
             success = False
             if self.safety_filter is not None:
                 physical_action = env.denormalize_action(action)
-                unextended_obs = np.squeeze(obs)[:env.symbolic.nx]
+                unextended_obs = np.atleast_1d(np.squeeze(obs))[:env.symbolic.nx]
                 certified_action, success = self.safety_filter.certify_action(unextended_obs, physical_action, info)
                 if success:
                     action = env.normalize_action(certified_action)
@@ -317,13 +317,11 @@ class PPO(BaseController):
             success = False
             if self.safety_filter is not None and (self.filter_train_actions is True or self.penalize_sf_diff is True):
                 uncertified = action_np[0, :].copy()
-                # physical_action = self.env.envs[0].denormalize_action(action)
-                physical_action = self.env.envs[0].denormalize_action(uncertified)
-                unextended_obs = np.squeeze(obs)[:self.env.envs[0].symbolic.nx]
+                physical_action = self._first_env_method('denormalize_action', uncertified)
+                unextended_obs = self._first_obs_vector(obs)[:self._first_env_nx()]
                 certified_action, success = self.safety_filter.certify_action(unextended_obs, physical_action, info)
                 if success and self.filter_train_actions is True:
-                    # action = self.env.envs[0].normalize_action(certified_action)
-                    action_np[0, :] = self.env.envs[0].normalize_action(np.atleast_1d(certified_action))
+                    action_np[0, :] = self._first_env_method('normalize_action', np.atleast_1d(certified_action))
                 elif not success and self.safety_filter.use_acados:
                     self.safety_filter.ocp_solver.reset()
 
@@ -404,6 +402,43 @@ class PPO(BaseController):
         if getattr(self, '_adv_reward_last_stats', None):
             results.update({f'adv_reward_{k}': v for k, v in self._adv_reward_last_stats.items()})
         return results
+
+    def _first_env_attr(self, attr_name, default=None):
+        if hasattr(self.env, 'envs'):
+            return getattr(self.env.envs[0], attr_name, default)
+        try:
+            vals = self.env.get_attr(attr_name, indices=[0])
+            if vals:
+                return vals[0]
+        except Exception:
+            pass
+        return default
+
+    def _first_env_method(self, method_name, *args, **kwargs):
+        if hasattr(self.env, 'envs'):
+            return getattr(self.env.envs[0], method_name)(*args, **kwargs)
+        vals = self.env.env_method(
+            method_name,
+            method_args=[list(args)],
+            method_kwargs=[kwargs],
+            indices=[0],
+        )
+        return vals[0]
+
+    def _first_env_nx(self):
+        state_dim = self._first_env_attr('state_dim', None)
+        if state_dim is not None:
+            return int(state_dim)
+        symbolic = self._first_env_attr('symbolic', None)
+        if symbolic is not None and hasattr(symbolic, 'nx'):
+            return int(symbolic.nx)
+        return int(np.atleast_1d(np.squeeze(self.obs)).shape[0])
+
+    def _first_obs_vector(self, obs):
+        obs_arr = np.asarray(obs)
+        if obs_arr.ndim > 1:
+            obs_arr = obs_arr[0]
+        return np.atleast_1d(np.squeeze(obs_arr))
 
     def log_step(self,
                  results
@@ -488,7 +523,7 @@ class PPO(BaseController):
             while success is not True or np.any(self.safety_filter.slack_prev > 1e-4):
                 obs, info = env.reset()
                 info['current_step'] = 1
-                unextended_obs = np.squeeze(obs)[:self.env.envs[0].symbolic.nx]
+                unextended_obs = self._first_obs_vector(obs)[:self._first_env_nx()]
                 self.safety_filter.reset_before_run()
                 _, success = self.safety_filter.certify_action(unextended_obs, action, info)
                 if not success and self.safety_filter.use_acados:
@@ -508,6 +543,10 @@ class PPO(BaseController):
 
         Configurable reward components (set via algo_config):
             - adv_reward_temperature: Scaling for normalization (default: 15.0)
+            - adv_use_correction_terms: Master switch for correction-based shaping (default: True)
+            - adv_use_state_terms: Master switch for state-based shaping (default: True)
+            - adv_use_quadrotor_state_terms: Master switch for quadrotor-only state shaping (default: True)
+            - adv_use_cartpole_state_terms: Master switch for cartpole-only state shaping (default: True)
             - adv_use_correction_reward: Enable correction-based rewards (default: True)
             - adv_use_correction_ratio: Enable correction ratio rewards (default: True)
             - adv_use_correction_bonus: Enable tiered correction bonuses (default: True)
@@ -519,6 +558,8 @@ class PPO(BaseController):
             - adv_use_stability_penalty: Penalize being too stable (default: True)
             - adv_use_altitude_penalty: Penalize low altitude (default: True) [quadrotor only]
             - adv_use_position_reward: Reward large position deviations (default: True) [quadrotor only]
+            - adv_quadrotor_position_target_x: Quadrotor x reference for position shaping (default: 0.0)
+            - adv_quadrotor_position_target_z: Quadrotor z reference for position shaping (default: 1.0)
 
         Returns shape (batch,).
         '''
@@ -531,7 +572,7 @@ class PPO(BaseController):
         infos = info.get('n', [info] * B) if isinstance(info, dict) else [dict()] * B
 
         # Detect environment type
-        env_name = getattr(self.env.envs[0], 'NAME', 'unknown') if hasattr(self.env, 'envs') else 'unknown'
+        env_name = self._first_env_attr('NAME', 'unknown')
         is_quadrotor = (env_name == 'quadrotor')
 
         # Config
@@ -540,6 +581,10 @@ class PPO(BaseController):
         use_correction_ratio = getattr(self, 'adv_use_correction_ratio', True)
         use_correction_bonus = getattr(self, 'adv_use_correction_bonus', True)
         use_no_correction_penalty = getattr(self, 'adv_use_no_correction_penalty', True)
+        use_correction_terms = getattr(self, 'adv_use_correction_terms', True)
+        use_state_terms = getattr(self, 'adv_use_state_terms', True)
+        use_quadrotor_state_terms = getattr(self, 'adv_use_quadrotor_state_terms', True)
+        use_cartpole_state_terms = getattr(self, 'adv_use_cartpole_state_terms', True)
         use_theta_reward = getattr(self, 'adv_use_theta_reward', True)
         use_velocity_reward = getattr(self, 'adv_use_velocity_reward', True)
         use_oscillation_reward = getattr(self, 'adv_use_oscillation_reward', True)
@@ -561,6 +606,8 @@ class PPO(BaseController):
         w_altitude = getattr(self, 'adv_w_altitude', 5.0)
         altitude_threshold = getattr(self, 'adv_altitude_threshold', 0.3)
         w_position = getattr(self, 'adv_w_position', 3.0)
+        quad_x_target = getattr(self, 'adv_quadrotor_position_target_x', 0.0)
+        quad_z_target = getattr(self, 'adv_quadrotor_position_target_z', 1.0)
 
         for i in range(B):
             s_prev = obs_b[i]
@@ -588,67 +635,67 @@ class PPO(BaseController):
                     # Get theta constraint limit (typically index 4 for quadrotor)
                     theta_lim = 0.25
                     try:
-                        theta_lim = float(self.env.envs[0].constraints.constraints[0].upper_bounds[4])
+                        constraints = self._first_env_attr('constraints', None)
+                        theta_lim = float(constraints.constraints[0].upper_bounds[4])
                     except Exception:
                         pass
                     theta_ratio = abs(th) / max(theta_lim, 1e-6)
 
-                    # Correction rewards
-                    if uncert_action is not None and cert_action is not None:
-                        uncert_mag = float(np.linalg.norm(np.atleast_1d(uncert_action)))
-                        correction = float(np.linalg.norm(np.atleast_1d(uncert_action) - np.atleast_1d(cert_action)))
+                    if use_correction_terms:
+                        # Correction rewards
+                        if uncert_action is not None and cert_action is not None:
+                            uncert_mag = float(np.linalg.norm(np.atleast_1d(uncert_action)))
+                            correction = float(np.linalg.norm(np.atleast_1d(uncert_action) - np.atleast_1d(cert_action)))
 
-                        if use_correction_reward:
-                            r += w_correction * correction
+                            if use_correction_reward:
+                                r += w_correction * correction
 
-                        if use_correction_ratio and uncert_mag > 0.1:
-                            r += w_correction_ratio * (correction / uncert_mag)
+                            if use_correction_ratio and uncert_mag > 0.1:
+                                r += w_correction_ratio * (correction / uncert_mag)
 
-                        if use_correction_bonus:
-                            bonus_t1 = getattr(self, 'adv_correction_bonus_tier1', 1.0)
-                            bonus_t2 = getattr(self, 'adv_correction_bonus_tier2', 2.0)
-                            bonus_t3 = getattr(self, 'adv_correction_bonus_tier3', 5.0)
-                            if correction > 0.05:
-                                r += bonus_t1
-                            if correction > 0.1:
-                                r += bonus_t2
-                            if correction > 0.2:
-                                r += bonus_t3
+                            if use_correction_bonus:
+                                bonus_t1 = getattr(self, 'adv_correction_bonus_tier1', 1.0)
+                                bonus_t2 = getattr(self, 'adv_correction_bonus_tier2', 2.0)
+                                bonus_t3 = getattr(self, 'adv_correction_bonus_tier3', 5.0)
+                                if correction > 0.05:
+                                    r += bonus_t1
+                                if correction > 0.1:
+                                    r += bonus_t2
+                                if correction > 0.2:
+                                    r += bonus_t3
 
-                        if use_no_correction_penalty and correction < 0.01:
-                            penalty = getattr(self, 'adv_no_correction_penalty', -3.0)
-                            r += penalty
+                            if use_no_correction_penalty and correction < 0.01:
+                                penalty = getattr(self, 'adv_no_correction_penalty', -3.0)
+                                r += penalty
 
-                    elif uncert_action is not None:
-                        r += 5.0 * float(np.linalg.norm(np.atleast_1d(uncert_action)))
+                        elif uncert_action is not None:
+                            r += 5.0 * float(np.linalg.norm(np.atleast_1d(uncert_action)))
 
-                    # State rewards for quadrotor
-                    if use_theta_reward:
-                        r += w_theta * theta_ratio
+                    if use_state_terms and use_quadrotor_state_terms:
+                        # State rewards for quadrotor
+                        if use_theta_reward:
+                            r += w_theta * theta_ratio
 
-                    if use_velocity_reward:
-                        # Reward angular velocity for quadrotor
-                        r += w_velocity * min(abs(thdot), 2.0)
+                        if use_velocity_reward:
+                            r += w_velocity * min(abs(thdot), 2.0)
 
-                    if use_oscillation_reward:
-                        if np.sign(thdot) != np.sign(thdot_prev) and thdot_prev != 0:
-                            r += w_oscillation
+                        if use_oscillation_reward:
+                            if np.sign(thdot) != np.sign(thdot_prev) and thdot_prev != 0:
+                                r += w_oscillation
 
-                    # Quadrotor-specific rewards
-                    if use_position_reward:
-                        # Reward large position deviations
-                        position_deviation = np.sqrt(x**2 + (z - 1.0)**2)  # Distance from hover point
-                        r += w_position * min(position_deviation, 2.0)
+                        # Quadrotor-specific rewards
+                        if use_position_reward:
+                            position_deviation = np.sqrt((x - quad_x_target)**2 + (z - quad_z_target)**2)
+                            r += w_position * min(position_deviation, 2.0)
 
-                    # Quadrotor-specific penalties
-                    if use_altitude_penalty and z < altitude_threshold:
-                        # Penalize low altitude (dangerous)
-                        r -= w_altitude * (altitude_threshold - z)
+                        # Quadrotor-specific penalties
+                        if use_altitude_penalty and z < altitude_threshold:
+                            r -= w_altitude * (altitude_threshold - z)
 
-                    if use_stability_penalty:
-                        if theta_ratio < 0.2 and abs(thdot) < 0.3:
-                            penalty = getattr(self, 'adv_stability_penalty', -8.0)
-                            r += penalty
+                        if use_stability_penalty:
+                            if theta_ratio < 0.2 and abs(thdot) < 0.3:
+                                penalty = getattr(self, 'adv_stability_penalty', -8.0)
+                                r += penalty
 
                 elif s.shape[0] >= 4:
                     # Cartpole state: [x, x_dot, theta, theta_dot, ...]
@@ -658,61 +705,64 @@ class PPO(BaseController):
                     # Get theta constraint limit
                     theta_lim = 0.2
                     try:
-                        theta_lim = float(self.env.envs[0].constraints.constraints[0].upper_bounds[2])
+                        constraints = self._first_env_attr('constraints', None)
+                        theta_lim = float(constraints.constraints[0].upper_bounds[2])
                     except Exception:
                         pass
                     theta_ratio = abs(th) / max(theta_lim, 1e-6)
 
-                    # Correction rewards
-                    if uncert_action is not None and cert_action is not None:
-                        uncert_mag = float(np.linalg.norm(np.atleast_1d(uncert_action)))
-                        correction = float(np.linalg.norm(np.atleast_1d(uncert_action) - np.atleast_1d(cert_action)))
+                    if use_correction_terms:
+                        # Correction rewards
+                        if uncert_action is not None and cert_action is not None:
+                            uncert_mag = float(np.linalg.norm(np.atleast_1d(uncert_action)))
+                            correction = float(np.linalg.norm(np.atleast_1d(uncert_action) - np.atleast_1d(cert_action)))
 
-                        if use_correction_reward:
-                            r += w_correction * correction
+                            if use_correction_reward:
+                                r += w_correction * correction
 
-                        if use_correction_ratio and uncert_mag > 0.1:
-                            r += w_correction_ratio * (correction / uncert_mag)
+                            if use_correction_ratio and uncert_mag > 0.1:
+                                r += w_correction_ratio * (correction / uncert_mag)
 
-                        if use_correction_bonus:
-                            bonus_t1 = getattr(self, 'adv_correction_bonus_tier1', 1.0)
-                            bonus_t2 = getattr(self, 'adv_correction_bonus_tier2', 2.0)
-                            bonus_t3 = getattr(self, 'adv_correction_bonus_tier3', 5.0)
-                            if correction > 1.0:
-                                r += bonus_t1
-                            if correction > 2.0:
-                                r += bonus_t2
-                            if correction > 3.0:
-                                r += bonus_t3
+                            if use_correction_bonus:
+                                bonus_t1 = getattr(self, 'adv_correction_bonus_tier1', 1.0)
+                                bonus_t2 = getattr(self, 'adv_correction_bonus_tier2', 2.0)
+                                bonus_t3 = getattr(self, 'adv_correction_bonus_tier3', 5.0)
+                                if correction > 1.0:
+                                    r += bonus_t1
+                                if correction > 2.0:
+                                    r += bonus_t2
+                                if correction > 3.0:
+                                    r += bonus_t3
 
-                        if use_no_correction_penalty and correction < 0.1:
-                            penalty = getattr(self, 'adv_no_correction_penalty', -3.0)
-                            r += penalty
+                            if use_no_correction_penalty and correction < 0.1:
+                                penalty = getattr(self, 'adv_no_correction_penalty', -3.0)
+                                r += penalty
 
-                    elif uncert_action is not None:
-                        r += 5.0 * float(np.linalg.norm(np.atleast_1d(uncert_action)))
+                        elif uncert_action is not None:
+                            r += 5.0 * float(np.linalg.norm(np.atleast_1d(uncert_action)))
 
-                    # State rewards for cartpole
-                    if use_theta_reward:
-                        r += w_theta * theta_ratio
+                    if use_state_terms and use_cartpole_state_terms:
+                        # State rewards for cartpole
+                        if use_theta_reward:
+                            r += w_theta * theta_ratio
 
-                    if use_velocity_reward:
-                        r += w_velocity * min(abs(thdot), 2.0)
+                        if use_velocity_reward:
+                            r += w_velocity * min(abs(thdot), 2.0)
 
-                    if use_oscillation_reward:
-                        if np.sign(thdot) != np.sign(thdot_prev) and thdot_prev != 0:
-                            r += w_oscillation
+                        if use_oscillation_reward:
+                            if np.sign(thdot) != np.sign(thdot_prev) and thdot_prev != 0:
+                                r += w_oscillation
 
-                    # Cartpole-specific penalties
-                    if use_cart_penalty:
-                        cart_threshold = getattr(self, 'adv_cart_threshold', 0.8)
-                        if abs(x) > cart_threshold:
-                            r -= w_cart_penalty * (abs(x) - cart_threshold)
+                        # Cartpole-specific penalties
+                        if use_cart_penalty:
+                            cart_threshold = getattr(self, 'adv_cart_threshold', 0.8)
+                            if abs(x) > cart_threshold:
+                                r -= w_cart_penalty * (abs(x) - cart_threshold)
 
-                    if use_stability_penalty:
-                        if theta_ratio < 0.2 and abs(thdot) < 0.5:
-                            penalty = getattr(self, 'adv_stability_penalty', -5.0)
-                            r += penalty
+                        if use_stability_penalty:
+                            if theta_ratio < 0.2 and abs(thdot) < 0.5:
+                                penalty = getattr(self, 'adv_stability_penalty', -5.0)
+                                r += penalty
 
                 else:
                     r = 0.25 * np.linalg.norm(s) + 0.5 * np.linalg.norm(s - s_prev)

@@ -6,6 +6,16 @@ from safe_control_gym.safety_filters.mpsc.mpsc_cost_function.abstract_cost impor
 class REGULARIZED_COST(MPSC_COST):
     '''Regularized Cost.'''
 
+    def __init__(self,
+                 env=None,
+                 mpsc_cost_horizon: int = 5,
+                 decay_factor: float = 0.85,
+                 regularization_weight: float = 1.0,
+                 ):
+        super().__init__(env, mpsc_cost_horizon, decay_factor)
+        self.regularization_weight = regularization_weight
+        self.uses_prev_u = True
+
     def get_cost(self, opti_dict):
         '''Returns the cost function for the MPSC optimization in symbolic form.
 
@@ -24,7 +34,7 @@ class REGULARIZED_COST(MPSC_COST):
         prev_u = opti.parameter(self.model.nu, 1)
         opti_dict['prev_u'] = prev_u
 
-        gamma = 1
+        gamma = self.regularization_weight
 
         cost = (u_L - next_u).T @ (u_L - next_u)
         for h in range(0, self.mpsc_cost_horizon):

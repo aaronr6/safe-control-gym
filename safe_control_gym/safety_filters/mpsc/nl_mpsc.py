@@ -11,6 +11,8 @@ Based on
       no. 2, pp. 794 801, Feb. 2021, doi: 10.1109/TAC.2020.2982585. http://arxiv.org/abs/1910.12081
 '''
 
+import os
+
 import numpy as np
 from acados_template import AcadosOcp, AcadosOcpSolver
 from acados_template.acados_model import AcadosModel
@@ -35,6 +37,8 @@ class NL_MPSC(MPSC):
                  soften_constraints: bool = False,
                  slack_cost: float = 250,
                  max_w: float = 0.002,
+                 terminal_set_scale: float = 0.5,
+                 terminal_cost_weight: float = 0.0,
                  **kwargs
                  ):
         '''Initialize the MPSC.
@@ -51,6 +55,8 @@ class NL_MPSC(MPSC):
             max_w (float or list): The constraint tightening rate per horizon step. Can be a scalar
                 (applied uniformly to all state constraints) or an array of length (n_states + n_inputs)
                 for per-variable tightening rates. Only state constraints are tightened (input rates ignored).
+            terminal_set_scale (float): Contraction factor in (0, 1] for terminal box around state-constraint midpoint.
+            terminal_cost_weight (float): Terminal-state quadratic weight; 0 disables terminal-state cost.
         '''
 
         super().__init__(
@@ -69,6 +75,8 @@ class NL_MPSC(MPSC):
         self.soften_constraints = soften_constraints
         self.slack_cost = slack_cost
         self.max_w = max_w
+        self.terminal_set_scale = terminal_set_scale
+        self.terminal_cost_weight = terminal_cost_weight
 
         self.n = self.model.nx
         self.m = self.model.nu
@@ -157,11 +165,20 @@ class NL_MPSC(MPSC):
         # Create ocp object to formulate the OCP
         ocp = AcadosOcp()
 
+        # Parallel SLURM array tasks can run in the same working directory. Use
+        # a unique suffix so acados-generated source/json files do not collide.
+        run_suffix = '{}_{}_{}'.format(
+            os.environ.get('SLURM_JOB_ID', 'noj'),
+            os.environ.get('SLURM_ARRAY_TASK_ID', 'na'),
+            os.getpid(),
+        )
+        ocp.code_gen_opts.code_export_directory = f'c_generated_code_mpsf_{run_suffix}'
+
         # Setup model
         model = AcadosModel()
         model.x = self.model.x_sym
         model.u = self.model.u_sym
-        model.name = self.env.NAME
+        model.name = f'{self.env.NAME}_{run_suffix}'
 
         # Dynamics model
         model.f_expl_expr = self.model.fc_func(model.x, model.u)
@@ -175,7 +192,10 @@ class NL_MPSC(MPSC):
 
         # Set cost module
         ocp.cost.cost_type = 'LINEAR_LS'
-        Q_mat = np.zeros((nx, nx))
+        # ACADOS requires W_0 to be positive definite. A zero state block makes W only
+        # positive semidefinite, which can fail consistency checks on newer versions.
+        # Keep state penalty effectively neutral but strictly PD via tiny regularization.
+        Q_mat = 1e-8 * np.eye(nx)
         R_mat = np.eye(nu)
         ocp.cost.W = block_diag(Q_mat, R_mat)
         ocp.cost.Vx = np.zeros((ny, nx))
@@ -201,6 +221,23 @@ class NL_MPSC(MPSC):
             ocp.cost.zu = np.array([self.slack_cost] * nx * 2 + [self.slack_cost * 100] * nu * 2)
             ocp.cost.zl = np.array([self.slack_cost] * nx * 2 + [self.slack_cost * 100] * nu * 2)
 
+        # Optional terminal ingredients for recoverability-focused robustification.
+        if getattr(self, 'use_terminal_set', False):
+            scale = float(np.clip(self.terminal_set_scale, 1e-3, 1.0))
+            state_lb = np.asarray(self.state_constraint.lower_bounds, dtype=float)
+            state_ub = np.asarray(self.state_constraint.upper_bounds, dtype=float)
+            term_lb = self.X_mid + scale * (state_lb - self.X_mid)
+            term_ub = self.X_mid + scale * (state_ub - self.X_mid)
+            ocp.constraints.idxbx_e = np.arange(nx)
+            ocp.constraints.lbx_e = term_lb
+            ocp.constraints.ubx_e = term_ub
+
+        if float(self.terminal_cost_weight) > 0.0:
+            ocp.cost.cost_type_e = 'LINEAR_LS'
+            ocp.cost.W_e = float(self.terminal_cost_weight) * np.eye(nx)
+            ocp.cost.Vx_e = np.eye(nx)
+            ocp.cost.yref_e = np.zeros(nx)
+
         # Options
         ocp.solver_options.N_horizon = self.horizon
         ocp.solver_options.tf = self.dt * self.horizon
@@ -211,14 +248,25 @@ class NL_MPSC(MPSC):
         ocp.solver_options.nlp_solver_type = 'SQP_RTI'
         ocp.solver_options.nlp_solver_max_iter = 200
 
-        solver_json = 'acados_ocp_mpsf.json'
+        solver_json = f'acados_ocp_mpsf_{run_suffix}.json'
         ocp_solver = AcadosOcpSolver(ocp, json_file=solver_json, generate=True, build=True)
 
-        for stage in range(self.mpsc_cost_horizon):
-            ocp_solver.cost_set(stage, 'W', (self.cost_function.decay_factor**stage) * ocp.cost.W)
+        active_cost_horizon = min(self.mpsc_cost_horizon, self.horizon)
 
-        for stage in range(self.mpsc_cost_horizon, self.horizon):
-            ocp_solver.cost_set(stage, 'W', 0 * ocp.cost.W)
+        def _safe_cost_set_w(stage, value):
+            try:
+                ocp_solver.cost_set(stage, 'W', value)
+            except ValueError as err:
+                # Some cost modes (e.g., one_step_cost) have ny=0 for later stages.
+                if 'mismatching dimension for field "W"' in str(err) and 'dimension (0, 0)' in str(err):
+                    return
+                raise
+
+        for stage in range(active_cost_horizon):
+            _safe_cost_set_w(stage, (self.cost_function.decay_factor**stage) * ocp.cost.W)
+
+        for stage in range(active_cost_horizon, self.horizon):
+            _safe_cost_set_w(stage, 0 * ocp.cost.W)
 
         g = np.zeros((self.horizon, self.p))
 

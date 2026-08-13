@@ -18,6 +18,7 @@ class Cost_Function(str, Enum):
     ONE_STEP_COST = 'one_step_cost'         # Default MPSC cost function.
     CONSTANT_COST = 'constant_cost'         # Naive smooth cost based on constant input assmuption.
     REGULARIZED_COST = 'regularized_cost'   # Penalizing rate-of-change of MPC input sequence
+    BLENDED_COST = 'blended_cost'           # Blend precomputed trajectory matching with rate penalization.
     LQR_COST = 'lqr_cost'                   # Smooth cost based on LQR policy assumption
     PRECOMPUTED_COST = 'precomputed_cost'   # Smooth cost based on precomputed future states
     LEARNED_COST = 'learned_cost'           # Smooth cost based on learned policy

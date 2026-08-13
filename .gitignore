@@ -7,6 +7,26 @@ temp/
 experiments/mpsc/models/rl_models/
 experiments/adversarial/models/rl_models/
 experiments/adversarial/plots/
+experiments/adversarial/ablation/
+experiments/adversarial/ablation_*/
+experiments/adversarial/c_generated_code_*/
+experiments/adversarial/models/
+experiments/adversarial/overleaf_export*/
+experiments/adversarial/thesis_report/
+experiments/adversarial/*.csv
+experiments/adversarial/*.ipynb
+experiments/adversarial/*.json
+experiments/adversarial/*.md
+experiments/adversarial/*.sbatch
+experiments/adversarial/*.tex
+experiments/adversarial/*.txt
+experiments/adversarial/**/*.csv
+experiments/adversarial/**/*.ipynb
+experiments/adversarial/**/*.json
+experiments/adversarial/**/*.md
+experiments/adversarial/**/*.sbatch
+experiments/adversarial/**/*.tex
+experiments/adversarial/**/*.txt
 
 # Large binary files (models, images, data)
 *.pt
@@ -23,7 +43,24 @@ experiments/adversarial/plots/
 
 # acados
 c_generated_code/
+c_generated_code_*/
 acados_*
+*.so
+*.o
+
+# Recoverability experiment outputs
+experiments/recoverability/slurm_logs/
+experiments/recoverability/ppo_runs/slurm_final_v112_confirm/
+experiments/recoverability/ppo_runs/slurm_final_v112_filter_rerun/
+experiments/recoverability/sweeps_phase2/
+experiments/recoverability/ppo_runs/*/local_logs/
+experiments/recoverability/ppo_runs/*/parallel_logs/
+experiments/recoverability/ppo_runs/*/parallel_status*.csv
+experiments/recoverability/ppo_runs/*/summary.csv
+experiments/recoverability/ppo_runs/*/summary_*.csv
+experiments/recoverability/ppo_runs/*/model_latest.pt
+experiments/recoverability/ppo_runs/*/models/
+experiments/recoverability/ppo_runs/*/temp-data/
 
 # Python
 __pycache__/

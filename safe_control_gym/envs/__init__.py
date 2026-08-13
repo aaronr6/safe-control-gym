@@ -9,3 +9,7 @@ register(idx='cartpole',
 register(idx='quadrotor',
          entry_point='safe_control_gym.envs.gym_pybullet_drones.quadrotor:Quadrotor',
          config_entry_point='safe_control_gym.envs.gym_pybullet_drones:quadrotor.yaml')
+
+register(idx='quadrotor_rpyt',
+         entry_point='safe_control_gym.envs.gym_pybullet_drones.rpyt_env:make_rpyt_quad',
+         config_entry_point='safe_control_gym.envs.gym_pybullet_drones:quadrotor.yaml')

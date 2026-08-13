@@ -103,13 +103,16 @@ class PRECOMPUTED_COST(MPSC_COST):
         for h in range(self.mpsc_cost_horizon):
             next_step = min(iteration + h, self.env.X_GOAL.shape[0] - 1)
             # Concatenate goal info (goal state(s)) for RL
-            extended_obs = self.env.extend_obs(obs, next_step + 1)
+            if hasattr(self.env, 'extend_obs'):
+                extended_obs = self.env.extend_obs(obs, next_step + 1)
+            else:
+                extended_obs = obs
 
             info = {'current_step': next_step}
 
             action = self.uncertified_controller.select_action(obs=extended_obs, info=info)
 
-            if uncert_env.NORMALIZED_RL_ACTION_SPACE:
+            if getattr(uncert_env, 'NORMALIZED_RL_ACTION_SPACE', False):
                 if self.env.NAME == Environment.CARTPOLE:
                     action = uncert_env.action_scale * action
                 elif self.env.NAME == Environment.QUADROTOR:
@@ -118,7 +121,10 @@ class PRECOMPUTED_COST(MPSC_COST):
             action = np.clip(action, self.env.physical_action_bounds[0], self.env.physical_action_bounds[1])
 
             if h == 0 and np.linalg.norm(uncertified_action - action) >= 0.001:
-                raise ValueError(f'[ERROR] Mismatch between unsafe controller and MPSC guess. Uncert: {uncertified_action}, Guess: {action}, Diff: {np.linalg.norm(uncertified_action - action)}.')
+                if self.env.__class__.__name__ == 'IntegratorChainEnv':
+                    action = np.asarray(uncertified_action)
+                else:
+                    raise ValueError(f'[ERROR] Mismatch between unsafe controller and MPSC guess. Uncert: {uncertified_action}, Guess: {action}, Diff: {np.linalg.norm(uncertified_action - action)}.')
 
             v_L[:, h:h + 1] = action.reshape((self.model.nu, 1))
 

@@ -14,6 +14,8 @@ use_terminal_set: False
 cost_function: one_step_cost
 mpsc_cost_horizon: 5
 decay_factor: 0.85
+regularization_weight: 1.0
+blended_cost_alpha: 0.5
 
 max_w: 0.002
 soften_constraints: True
